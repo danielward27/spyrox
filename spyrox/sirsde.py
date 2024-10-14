@@ -7,6 +7,7 @@ import equinox as eqx
 import flowjax.distributions as dist
 import jax.numpy as jnp
 import jax.random as jr
+import numpyro
 from diffrax import (
     ControlTerm,
     Euler,
@@ -17,74 +18,157 @@ from diffrax import (
     diffeqsolve,
 )
 from flowjax import bijections as bij
+from flowjax.distributions import Transformed
 from flowjax.experimental.numpyro import sample
-from flowjax.flows import block_neural_autoregressive_flow, masked_autoregressive_flow
+from flowjax.flows import block_neural_autoregressive_flow, coupling_flow
 from jax import Array
 from jaxtyping import PRNGKeyArray, ScalarLike
 from numpyro import deterministic
 from pyrox.program import AbstractProgram
 
-from spyrox.simulator import SimulatorDistribution
+from spyrox.simulator import AbstactProgramWithSurrogate, SimulatorToDistribution
 
 
-class SIRSDEModel(AbstractProgram):
-    simulator: SimulatorDistribution
+class SIRSDEModel(AbstactProgramWithSurrogate):
+    surrogate: Transformed
+    simulator: SimulatorToDistribution
+    n_obs = 5
 
     def __init__(
         self,
         key: PRNGKeyArray,
     ):
-        surrogate = block_neural_autoregressive_flow(
+        self.surrogate = block_neural_autoregressive_flow(
             key,
             base_dist=dist.Normal(jnp.zeros(SIRSDESimulator.out_dim)),
             cond_dim=SIRSDESimulator.in_dim,
         )
-        self.simulator = SimulatorDistribution(
+        self.simulator = SimulatorToDistribution(
             SIRSDESimulator(time_steps=40),
             shape=(SIRSDESimulator.out_dim,),
             cond_shape=(SIRSDESimulator.in_dim,),
-            surrogate=surrogate,
         )
 
-    def __call__(self, obs: Array | None = None):
-        beta_mean = 0.1
-        beta_count = 10
-        alpha = beta_mean * beta_count
-        beta = beta_count * (1 - beta_mean)
-        recovery_rate = sample("recovery_rate", dist.Beta(alpha, beta))
-        infection_rate = sample("infection_rate", dist.Beta(alpha, beta))
-        r0_mean_reversion = sample("r0_mean_reversion", dist.Beta(alpha, beta))
-        r0_volatility = sample("r0_volatility", dist.Beta(alpha, beta))
+    def __call__(self, *, use_surrogate: bool, obs: Array | None = None):
+        beta_count = 20  # Higher will be tighter
 
-        z = deterministic(
-            "z",
-            jnp.stack(
-                [recovery_rate, infection_rate, r0_mean_reversion, r0_volatility],
+        # Give global betas a mean of 0.1
+        a = 0.1 * beta_count
+        b = (1 - 0.1) * beta_count
+
+        infection_rate_mean = sample("infection_rate_mean", dist.Beta(a, b))
+        recovery_rate_mean = sample("recovery_rate_mean", dist.Beta(a, b))
+        r0_mean_reversion_mean = sample("r0_mean_reversion_mean", dist.Beta(a, b))
+        r0_volatility_mean = sample("r0_volatility_mean", dist.Beta(a, b))
+
+        # TODO consider setting plate dim to one for simulating?
+        # TODO can we avoid sampling global on round 1+?
+        numpyro.deterministic(
+            "global_means",
+            jnp.hstack(
+                [
+                    infection_rate_mean,
+                    recovery_rate_mean,
+                    r0_mean_reversion_mean,
+                    r0_volatility_mean,
+                ],
             ),
         )
-        sample("x", self.simulator, condition=z, obs=obs)
+
+        with numpyro.plate("n_obs", SIRSDEModel.n_obs):
+            infection_rate = sample(
+                "infection_rate",
+                dist.Beta(
+                    infection_rate_mean * beta_count,
+                    beta_count * (1 - infection_rate_mean),
+                ),
+            )
+
+            recovery_rate = sample(
+                "recovery_rate",
+                dist.Beta(
+                    recovery_rate_mean * beta_count,
+                    beta_count * (1 - recovery_rate_mean),
+                ),
+            )
+
+            r0_mean_reversion = sample(
+                "r0_mean_reversion",
+                dist.Beta(
+                    r0_mean_reversion_mean * beta_count,
+                    beta_count * (1 - r0_mean_reversion_mean),
+                ),
+            )
+            r0_volatility = sample(
+                "r0_volatility",
+                dist.Beta(
+                    r0_volatility_mean * beta_count,
+                    beta_count * (1 - r0_volatility_mean),
+                ),
+            )
+            z = jnp.stack(
+                [infection_rate, recovery_rate, r0_mean_reversion, r0_volatility],
+                axis=1,
+            )
+            # For numerical stability, we clip to avoid sigmoid(0)
+            deterministic("z", jnp.clip(z, min=1e-7))
+
+            if use_surrogate:
+                sample("x", self.surrogate, condition=z, obs=obs)
+            else:
+                sample("x", self.simulator, condition=z, obs=obs)
 
 
 class SIRSDEGuide(AbstractProgram):
-    posterior: dist.Transformed
+    local_posterior: dist.Transformed
+    global_posterior: dist.Transformed
 
     def __init__(self, key: PRNGKeyArray):
-
-        self.posterior = dist.Transformed(
-            masked_autoregressive_flow(
-                key,
+        key, subkey = jr.split(key)
+        # q(tau|tau, \mathcal{x})
+        self.global_posterior = dist.Transformed(
+            coupling_flow(
+                subkey,
                 base_dist=dist.Normal(-jnp.ones(SIRSDESimulator.in_dim)),
-                cond_dim=SIRSDESimulator.out_dim,
+                flow_layers=4,
             ),
             bij.Sigmoid((4,)),  # Map to [0, 1] support
         )
 
-    def __call__(self, obs: Array | None = None):
-        z = sample("z", self.posterior, condition=obs)
-        deterministic("recovery_rate", z[0])
-        deterministic("infection_rate", z[1])
-        deterministic("r0_mean_reversion", z[2])
-        deterministic("r0_volatility", z[3])
+        key, subkey = jr.split(key)
+        # q(z|tau, x_i)
+        self.local_posterior = dist.Transformed(
+            coupling_flow(
+                subkey,
+                base_dist=dist.Normal(-jnp.ones(SIRSDESimulator.in_dim)),
+                cond_dim=SIRSDESimulator.out_dim + SIRSDESimulator.in_dim,
+                flow_layers=4,
+            ),
+            bij.Sigmoid((4,)),  # Map to [0, 1] support
+        )
+
+    def __call__(self, *, obs: Array | None = None):
+
+        # Exchagable neural net / deep set network to embed observations
+        # global_embedding = eqx.filter_vmap(self.mlp)(obs).mean(axis=0)
+
+        global_means = sample("global_means", self.global_posterior)
+        deterministic("recovery_rate_mean", global_means[0])
+        deterministic("infection_rate_mean", global_means[1])
+        deterministic("r0_mean_reversion_mean", global_means[2])
+        deterministic("r0_volatility_mean", global_means[3])
+
+        local_condition = jnp.hstack(
+            (obs, jnp.tile(global_means, (SIRSDEModel.n_obs, 1))),
+        )
+
+        with numpyro.plate("n_obs", 5):
+            z = sample("z", self.local_posterior, condition=local_condition)
+
+        deterministic("recovery_rate", z[:, 0])
+        deterministic("infection_rate", z[:, 1])
+        deterministic("r0_mean_reversion", z[:, 2])
+        deterministic("r0_volatility", z[:, 3])
 
 
 class SIRSDESimulator(eqx.Module):
@@ -141,7 +225,8 @@ class SIRSDESimulator(eqx.Module):
             saveat=SaveAt(ts=range(1, self.time_steps + 1)),
             max_steps=self.max_solve_steps,
         )
-        return sol.ys[:, 1]
+
+        return jnp.nan_to_num(sol.ys[:, 1], nan=0, posinf=0, neginf=0)
 
     def ode(
         self,
