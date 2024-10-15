@@ -44,13 +44,13 @@ class SIRSDEModel(AbstactProgramWithSurrogate):
             cond_dim=SIRSDESimulator.in_dim,
         )
         self.simulator = SimulatorToDistribution(
-            SIRSDESimulator(time_steps=40),
+            SIRSDESimulator(time_steps=20),
             shape=(SIRSDESimulator.out_dim,),
             cond_shape=(SIRSDESimulator.in_dim,),
         )
 
     def __call__(self, *, use_surrogate: bool, obs: Array | None = None):
-        beta_count = 20  # Higher will be tighter
+        beta_count = 25  # Higher will be tighter
 
         # Give global betas a mean of 0.1
         a = 0.1 * beta_count
@@ -110,7 +110,7 @@ class SIRSDEModel(AbstactProgramWithSurrogate):
                 [infection_rate, recovery_rate, r0_mean_reversion, r0_volatility],
                 axis=1,
             )
-            # For numerical stability, we clip to avoid sigmoid(0)
+            # For numerical stability, we clip to avoid inv(sigmoid)(0)
             deterministic("z", jnp.clip(z, min=1e-7))
 
             if use_surrogate:
@@ -148,13 +148,9 @@ class SIRSDEGuide(AbstractProgram):
         )
 
     def __call__(self, *, obs: Array | None = None):
-
-        # Exchagable neural net / deep set network to embed observations
-        # global_embedding = eqx.filter_vmap(self.mlp)(obs).mean(axis=0)
-
         global_means = sample("global_means", self.global_posterior)
-        deterministic("recovery_rate_mean", global_means[0])
-        deterministic("infection_rate_mean", global_means[1])
+        deterministic("infection_rate_mean", global_means[0])
+        deterministic("recovery_rate_mean", global_means[1])
         deterministic("r0_mean_reversion_mean", global_means[2])
         deterministic("r0_volatility_mean", global_means[3])
 
@@ -165,8 +161,8 @@ class SIRSDEGuide(AbstractProgram):
         with numpyro.plate("n_obs", 5):
             z = sample("z", self.local_posterior, condition=local_condition)
 
-        deterministic("recovery_rate", z[:, 0])
-        deterministic("infection_rate", z[:, 1])
+        deterministic("infection_rate", z[:, 0])
+        deterministic("recovery_rate", z[:, 1])
         deterministic("r0_mean_reversion", z[:, 2])
         deterministic("r0_volatility", z[:, 3])
 
@@ -177,7 +173,7 @@ class SIRSDESimulator(eqx.Module):
     time_steps: int
     max_solve_steps: int
     in_dim = 4
-    out_dim = 3
+    out_dim = 20
 
     def __init__(self, *, time_steps: int, max_solve_steps: int = 5000):
         self.time_steps = time_steps
@@ -257,8 +253,9 @@ class SIRSDESimulator(eqx.Module):
         return scale * jnp.array([0, 0, 0, r0_volatility])
 
     def summarize(self, key: PRNGKeyArray, x: Array):
-        x = jnp.clip(x, a_min=1e-5)
-        max_ = x.max()
-        max_at = (jnp.argmax(x) + jr.uniform(key)) / self.time_steps
-        vol = jnp.std(jnp.diff(jnp.log(x)))
-        return jnp.array([max_, max_at, vol])
+        return x
+        # x = jnp.clip(x, a_min=1e-5)
+        # max_ = x.max()
+        # max_at = (jnp.argmax(x) + jr.uniform(key)) / self.time_steps
+        # vol = jnp.std(jnp.diff(jnp.log(x)))
+        # return jnp.array([max_, max_at, vol])

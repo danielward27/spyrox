@@ -144,9 +144,12 @@ def rounds_based_snle(
         key, subkey = jr.split(key)
         model = SetKwargs(model, use_surrogate=True)
 
-        (model, guide), loss_vals = fit_to_key_based_loss(
+        (_, guide), loss_vals = fit_to_key_based_loss(
             key=subkey,
-            tree=(wrappers.non_trainable(model), guide),
+            tree=(
+                wrappers.non_trainable(model),
+                guide,
+            ),  # TODO this marks as non-trainable!
             **guide_fit_kwargs,
         )
         model = model.program  # Undo set kwargs
