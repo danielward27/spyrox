@@ -1,12 +1,8 @@
-from collections.abc import Callable
-from functools import partial
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import optax
-from flowjax import wrappers
+import paramax
 from flowjax.distributions import AbstractDistribution
 
 # TODO consider just using flowjax.fit_variational
@@ -15,7 +11,7 @@ from flowjax.train.loops import fit_to_data, fit_to_key_based_loss
 from jaxtyping import Array, PRNGKeyArray, PyTree
 from pyrox.program import AbstractProgram, SetKwargs
 
-from spyrox.simulator import AbstactProgramWithSurrogate, SimulatorToDistribution
+from spyrox.simulator import AbstactProgramWithSurrogate
 
 
 class ProgramToProgramSamplesLoss(eqx.Module):
@@ -27,7 +23,7 @@ class ProgramToProgramSamplesLoss(eqx.Module):
         self.program_to_sample = program_to_sample
 
     def __call__(self, params: PyTree, static: PyTree, key: PRNGKeyArray):
-        program = wrappers.unwrap(eqx.combine(params, static))
+        program = paramax.unwrap(eqx.combine(params, static))
         sample = self.program_to_sample.sample(key)
         loss = -program.log_prob(sample)
         eqx.debug.breakpoint_if(~jnp.isfinite(loss))  # TODO
@@ -35,7 +31,7 @@ class ProgramToProgramSamplesLoss(eqx.Module):
 
 
 def get_surrogate(program: AbstractProgram) -> AbstractDistribution:
-    "Maps across program, in case wrapper class used."
+    """Maps across program, in case wrapper class used."""
     leaves = jax.tree.leaves(
         program,
         is_leaf=lambda leaf: isinstance(leaf, AbstactProgramWithSurrogate),
@@ -74,9 +70,10 @@ def rounds_based_snle(
     guide: AbstractProgram,
     num_rounds: int,
     sim_per_round: int,
+    sim_param_name: str,
     surrogate_fit_kwargs: dict,
     guide_fit_kwargs: dict,
-    simulator_param_name: str,
+    obs: Array,
 ):
     # We assume the model has a use_surrogate.
     # We assume model has attribute model.simulator
@@ -84,16 +81,16 @@ def rounds_based_snle(
     # We assume the last dimensions of simulations are the shape of the simulator
     # not e.g. a plate
 
+    # The guide is always conditioned on obs, so we do that now
+    guide = SetKwargs(guide, obs=obs)
+
     losses = {
         "surrogate": {"train": [], "val": []},
         "guide": [],
     }
 
-    def _vmap(fn, **kwargs):  # filter_vmap with kwargs
-        return eqx.filter_vmap(partial(fn))
-
     # infer obs name
-    obs_name = model.site_names(use_surrogate=False).observed
+    obs_name = model.site_names(use_surrogate=False, obs=obs).observed
     assert len(obs_name) == 1
     obs_name = list(obs_name)[0]
 
@@ -106,22 +103,33 @@ def rounds_based_snle(
 
         def simulate_single(key):
             proposal_key, sim_key = jr.split(key)
-            sim_params = proposal.sample(proposal_key)[simulator_param_name]
-            simulation = model.sample(sim_key, use_surrogate=False)[obs_name]
-            return sim_params, simulation
+            proposal_sample = proposal.sample(proposal_key)
+            simulation = model.sample(
+                sim_key,
+                use_surrogate=False,
+                condition=proposal_sample,
+            )
+            return simulation[sim_param_name], simulation[obs_name]
 
         key, subkey = jr.split(key)
         sim_params, simulations = jax.vmap(simulate_single)(
             jr.split(subkey, sim_per_round),
         )
-
         # Reshape to remove any plates
         simulations = simulations.reshape(-1, *get_surrogate(model).shape)
         sim_params = sim_params.reshape(-1, *get_surrogate(model).cond_shape)
         return simulations, sim_params
 
-    for _ in range(num_rounds):
-        simulations, sim_params = simulate(key, guide, model)
+    for i in range(num_rounds):
+
+        if i == 0:
+            proposal = model.get_prior(observed_sites=(obs_name,))
+            proposal = SetKwargs(proposal, use_surrogate=True)  # Unused
+        else:
+            proposal = guide
+
+        key, subkey = jr.split(key)
+        simulations, sim_params = simulate(key, proposal, model)
 
         if not jnp.isfinite(simulations).all():
             raise ValueError("Inf or nan values detected in simulations.")
@@ -142,19 +150,20 @@ def rounds_based_snle(
 
         # Fit guide
         key, subkey = jr.split(key)
-        model = SetKwargs(model, use_surrogate=True)
 
         (_, guide), loss_vals = fit_to_key_based_loss(
             key=subkey,
             tree=(
-                wrappers.non_trainable(model),
+                paramax.non_trainable(SetKwargs(model, use_surrogate=True, obs=obs)),
                 guide,
-            ),  # TODO this marks as non-trainable!
+            ),
             **guide_fit_kwargs,
         )
-        model = model.program  # Undo set kwargs
+
         losses["guide"].append(loss_vals)
 
+    # Unwrap the guide from SetKwargs wrapper
+    guide = guide.program
     return (model, guide), losses
 
 

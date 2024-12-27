@@ -3,6 +3,7 @@ from collections.abc import Callable
 import equinox as eqx
 from flowjax.distributions import AbstractDistribution
 from jaxtyping import Array, PRNGKeyArray
+from numpyro import distributions as ndist
 from pyrox.program import AbstractProgram
 
 
@@ -30,8 +31,7 @@ class SimulatorToDistribution(AbstractDistribution):
         return self.simulator(key, condition)
 
 
-# TODO this vs an unwrappable?
 class AbstactProgramWithSurrogate(AbstractProgram):
 
-    surrogate: eqx.AbstractVar[AbstractDistribution]
-    simulator: eqx.AbstractVar[SimulatorToDistribution]
+    surrogate: eqx.AbstractVar[AbstractDistribution | ndist.Distribution]
+    simulator: eqx.AbstractVar[AbstractDistribution | ndist.Distribution]
