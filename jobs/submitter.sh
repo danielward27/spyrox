@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# Example submission from spyrox root
+# chmod +x jobs/submitter.sh && ./jobs/submitter.sh
+
+# Define number of rounds and loss names
+num_rounds=(1 4 8)
+loss_names=("SoftCVI" "ELBO" "SNIS-fKL")
+
+for loss in "${loss_names[@]}"; do
+    for rounds in "${num_rounds[@]}"; do
+        sbatch --job-name="${loss}_${rounds}" jobs/job.sh "$loss" "$rounds"
+    done
+done

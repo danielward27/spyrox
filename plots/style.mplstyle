@@ -1,0 +1,30 @@
+# Font sizes
+xtick.labelsize : 7
+ytick.labelsize : 7
+legend.fontsize : 10
+legend.title_fontsize : 11
+axes.titlesize : 11
+axes.labelsize : 10
+figure.titlesize : 11
+
+# Tick length
+xtick.major.size : 2
+ytick.major.size : 2
+
+# Legend
+legend.frameon : False
+legend.loc: "center"
+legend.handlelength: 1.5
+legend.handletextpad: 0.4
+legend.columnspacing: 1.4
+
+# Use serif fonts
+font.family : serif
+mathtext.fontset : dejavuserif
+
+# Use LaTeX for math formatting
+text.usetex : True
+text.latex.preamble : \usepackage{amsmath} \usepackage{amssymb}
+
+# Default figure size equal to \textwidth
+figure.figsize: 5.5, 4

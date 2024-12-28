@@ -1,4 +1,5 @@
 from functools import partial
+from pathlib import Path
 
 import equinox as eqx
 import jax
@@ -6,6 +7,11 @@ import jax.random as jr
 import numpyro
 from flowjax.distributions import AbstractDistribution
 from flowjax.experimental.numpyro import _RealNdim
+
+
+def get_abspath_project_root():
+    """Get the path to the projects root directory."""
+    return Path(__file__).parent.parent
 
 
 class VmapDistribution(numpyro.distributions.Distribution):
@@ -27,12 +33,12 @@ class VmapDistribution(numpyro.distributions.Distribution):
     def __init__(
         self,
         dist: AbstractDistribution,
-        batch_size: int,
     ):
         self.dist = dist
-        self.batch_size = batch_size
+        leaf = jax.tree_leaves(eqx.filter(dist, eqx.is_inexact_array))[0]
+        self.batch_size = leaf.shape[0]
         self.support = _RealNdim(dist.ndim)
-        super().__init__((batch_size,), dist.shape)
+        super().__init__((self.batch_size,), dist.shape)
 
     def sample(self, key, sample_shape=()):
         # TODO remove when old-style keys fully deprecated
