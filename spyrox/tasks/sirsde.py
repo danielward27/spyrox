@@ -54,6 +54,9 @@ def get_task(key):
     return model, guide
 
 
+from flowjax.bijections import RationalQuadraticSpline
+
+
 class SIRSDEModel(AbstactProgramWithSurrogate):
     surrogate: Transformed
     simulator: SimulatorToDistribution
@@ -68,6 +71,7 @@ class SIRSDEModel(AbstactProgramWithSurrogate):
             key,
             base_dist=dist.Normal(jnp.zeros(SIRSDESimulator.out_dim)),
             cond_dim=SIRSDESimulator.in_dim,
+            transformer=RationalQuadraticSpline(knots=8, interval=4),
         )
         self.simulator = SimulatorToDistribution(
             SIRSDESimulator(time_steps=20),
@@ -173,6 +177,11 @@ class SIRSDESimulator(eqx.Module):
         r0_mean_reversion: ScalarLike,
         r0_volatility: ScalarLike,
     ):
+        infection_rate, recovery_rate, r0_mean_reversion, r0_volatility = (
+            jnp.clip(p, min=1e-7, max=1 - 1e-7)
+            for p in (infection_rate, recovery_rate, r0_mean_reversion, r0_volatility)
+        )
+
         t0, t1 = 0, self.time_steps + 1
         ode = partial(
             self.ode,

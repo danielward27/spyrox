@@ -5,7 +5,7 @@
 
 # Define number of rounds and loss names
 num_rounds=(1 4 8)
-loss_names=("SoftCVI" "ELBO" "SNIS-fKL")
+loss_names=("ELBO" "SNIS-fKL" "SoftCVI(a=0.75)" "SoftCVI(a=1)")
 
 for loss in "${loss_names[@]}"; do
     for rounds in "${num_rounds[@]}"; do

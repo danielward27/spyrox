@@ -20,9 +20,13 @@ from spyrox.train import rounds_based_snle
 def get_losses(n_particles=8):
     """Get the loss functions under consideration."""
     return {
-        "SoftCVI": losses.SoftContrastiveEstimationLoss(
+        "SoftCVI(a=0.75)": losses.SoftContrastiveEstimationLoss(
             n_particles=n_particles,
             alpha=0.75,
+        ),
+        "SoftCVI(a=1)": losses.SoftContrastiveEstimationLoss(
+            n_particles=n_particles,
+            alpha=1,
         ),
         "ELBO": losses.EvidenceLowerBoundLoss(n_particles=n_particles),
         "SNIS-fKL": losses.SelfNormImportanceWeightedForwardKLLoss(
@@ -93,9 +97,7 @@ def run_task(
         model_kwargs={"use_surrogate": False, "obs": obs},
     )
 
-    log_prob_true = data_space_guide.log_prob(
-        {k: v for k, v in true_latents.items() if k != "z"},
-    )
+    log_prob_true = data_space_guide.log_prob(true_latents)
 
     guide_samps = jax.jit(jax.vmap(data_space_guide.sample))(jr.split(key, n_samples))
     guide_lps = eqx.filter_vmap(data_space_guide.log_prob)(guide_samps)
@@ -115,15 +117,14 @@ def run_task(
     jnp.savez(f"./results/losses/{results_str}.npz", **losses)
 
     # Save guide
-    eqx.tree_serialise_leaves(
-        f"./results/models/guide_{loss_name}_{seed}.eqx",
-        guide,
-    )
+    eqx.tree_serialise_leaves(f"./results/models/{results_str}.eqx", guide)
 
 
 if __name__ == "__main__":
     # Quicker to run example command (not reasonable values though!)
-    # python -m scripts.run_task --seed=0 --loss-name="SoftCVI" --num-rounds=2 --simulation-budget=100 --guide-steps=10 --surrogate-max-epochs=10 --show-progress
+    # python -m scripts.run_task --seed=-1 --loss-name="SoftCVI" --num-rounds=2 --simulation-budget=100 --guide-steps=10 --surrogate-max-epochs=10 --show-progress
+
+    # Note guide steps is total.
 
     os.chdir(utils.get_abspath_project_root())
     parser = argparse.ArgumentParser(description="softcvi")
@@ -149,15 +150,18 @@ if __name__ == "__main__":
         "show_progress": args.show_progress,
     }
 
+    # ELBO results resemble prior (and bad performance) with lr=1e-4 so we use 1e-3
+    guide_lr = 1e-3 if args.loss_name == "ELBO" else 1e-4
+
     guide_fit_kwargs = {
         "optimizer": optax.apply_if_finite(
             optax.chain(
-                optax.adam(5e-4),
+                optax.adam(guide_lr),
                 optax.clip_by_global_norm(5),
             ),
             max_consecutive_errors=10,
         ),
-        "steps": args.guide_steps,
+        "steps": args.guide_steps // args.num_rounds,
         "show_progress": args.show_progress,
     }
 

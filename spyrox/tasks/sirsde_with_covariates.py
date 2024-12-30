@@ -37,10 +37,7 @@ def get_task(
         "recovery_rate_bias",
         "r0_mean_reversion_mean",
         "r0_volatility_mean",
-        "infection_rate",
-        "recovery_rate",
-        "r0_mean_reversion",
-        "r0_volatility",
+        "z",
     ]
     reparam = {n: TransformReparam() for n in latents}
     model = ReparameterizedProgram(model, reparam)
@@ -50,10 +47,10 @@ def get_task(
 class SIRSDECovariateModel(AbstactProgramWithSurrogate):
     surrogate: Transformed
     simulator: SimulatorToDistribution
-    local_param_dim = 4
     covariates: Array
-    n_obs = 20
+    n_obs = 10
     n_covariates = 3
+    n_z = 4
 
     def __init__(
         self,
@@ -102,44 +99,28 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
         )
         recovery_rate_means = self.covariates @ recovery_rate_beta + recovery_rate_bias
 
+        z_means = jnp.stack(
+            [
+                infection_rate_means,
+                recovery_rate_means,
+                jnp.full(self.n_obs, r0_mean_reversion_mean),
+                jnp.full(self.n_obs, r0_volatility_mean),
+            ],
+            axis=1,
+        )
+
         with numpyro.plate("n_obs", SIRSDECovariateModel.n_obs):
 
-            infection_rate = sample(
-                "infection_rate",
+            z = sample(
+                "z",
                 ndist.TransformedDistribution(
-                    ndist.Normal(jnp.zeros(self.n_obs), 1),
+                    ndist.Normal(jnp.zeros_like(z_means), 1),
                     [
-                        ndist.transforms.AffineTransform(infection_rate_means, 0.2),
+                        ndist.transforms.AffineTransform(z_means, 0.2),
                         ndist.transforms.ExpTransform(),
                     ],
-                ),
+                ).to_event(1),
             )
-
-            recovery_rate = sample(
-                "recovery_rate",
-                ndist.TransformedDistribution(
-                    ndist.Normal(jnp.zeros(self.n_obs), 1),
-                    [
-                        ndist.transforms.AffineTransform(recovery_rate_means, 0.2),
-                        ndist.transforms.ExpTransform(),
-                    ],
-                ),
-            )
-
-            r0_mean_reversion = sample(
-                "r0_mean_reversion",
-                LogNormal(r0_mean_reversion_mean, 0.2),
-            )
-
-            r0_volatility = sample(
-                "r0_volatility",
-                LogNormal(r0_volatility_mean, 0.2),
-            )
-            z = jnp.stack(
-                [infection_rate, recovery_rate, r0_mean_reversion, r0_volatility],
-                axis=1,
-            )
-            z = deterministic("z", jnp.clip(z, min=1e-7, max=1 - 1e-7))
 
             if use_surrogate:
                 sample("x", self.surrogate, condition=z, obs=obs)
@@ -147,17 +128,18 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
                 sample("x", self.simulator, condition=z, obs=obs)
 
 
+from flowjax.bijections import RationalQuadraticSpline
+from flowjax.flows import masked_autoregressive_flow
+
+
 class SIRSDECovariateGuide(AbstractProgram):
-    infection_rate_beta_dist: AbstractDistribution
-    infection_rate_bias_dist: AbstractDistribution
-    recovery_rate_beta_dist: AbstractDistribution
-    recovery_rate_bias_dist: AbstractDistribution
-    r0_mean_reversion_mean_dist: AbstractDistribution
-    r0_volatility_mean_dist: AbstractDistribution
-    infection_rate_dist: AbstractDistribution
-    recovery_rate_dist: AbstractDistribution
-    r0_mean_reversion_dist: AbstractDistribution
-    r0_volatility_dist: AbstractDistribution
+    infection_rate_beta_dist: Normal
+    infection_rate_bias_dist: Normal
+    recovery_rate_beta_dist: Normal
+    recovery_rate_bias_dist: Normal
+    r0_mean_reversion_mean_dist: Normal
+    r0_volatility_mean_dist: Normal
+    z_dist: AbstractDistribution
 
     def __init__(self, key: PRNGKeyArray):
         n_cov = SIRSDECovariateModel.n_covariates
@@ -168,10 +150,16 @@ class SIRSDECovariateGuide(AbstractProgram):
         self.recovery_rate_bias_dist = Normal()
         self.r0_mean_reversion_mean_dist = Normal()
         self.r0_volatility_mean_dist = Normal()
-        self.infection_rate_dist = eqx.filter_vmap(Normal)(jnp.zeros(n_obs))
-        self.recovery_rate_dist = eqx.filter_vmap(Normal)(jnp.zeros(n_obs))
-        self.r0_mean_reversion_dist = eqx.filter_vmap(Normal)(jnp.zeros(n_obs))
-        self.r0_volatility_dist = eqx.filter_vmap(Normal)(jnp.zeros(n_obs))
+
+        def get_flow(key):
+            return masked_autoregressive_flow(
+                key,
+                base_dist=Normal(jnp.zeros(SIRSDECovariateModel.n_z)),
+                flow_layers=4,
+                transformer=RationalQuadraticSpline(knots=8, interval=4),
+            )
+
+        self.z_dist = eqx.filter_vmap(get_flow)(jr.split(key, n_obs))
 
     def __call__(self, obs: Array | None = None):  # TODO obs ignored.
         sample("infection_rate_beta_base", self.infection_rate_beta_dist)
@@ -184,89 +172,150 @@ class SIRSDECovariateGuide(AbstractProgram):
         sample("r0_volatility_mean_base", self.r0_volatility_mean_dist)
 
         with numpyro.plate("n_obs", size=SIRSDECovariateModel.n_obs):
-            sample("infection_rate_base", VmapDistribution(self.infection_rate_dist))
-            sample("recovery_rate_base", VmapDistribution(self.recovery_rate_dist))
-            sample(
-                "r0_mean_reversion_base", VmapDistribution(self.r0_mean_reversion_dist),
-            )
-            sample("r0_volatility_base", VmapDistribution(self.r0_volatility_dist))
+            sample("z_base", VmapDistribution(self.z_dist))
 
 
-# class SIRSDECovariateGuide(AbstractProgram):
-#     local_posterior: ndist.Normal
-#     global_posterior: ndist.Normal
+# class SIRSDECovariateModel(AbstactProgramWithSurrogate):
+#     surrogate: Transformed
+#     simulator: SimulatorToDistribution
+#     local_param_dim = 4
+#     covariates: Array
+#     n_obs = 20
+#     n_covariates = 3
 
-#     def __init__(self, key: PRNGKeyArray):
-#         global_param_dim = SIRSDECovariateModel.n_covariates * 2 + 4
+#     def __init__(
+#         self,
+#         key: PRNGKeyArray,
+#         covariates: Array,
+#     ):
+#         self.surrogate = masked_autoregressive_flow(
+#             key,
+#             base_dist=dist.Normal(jnp.zeros(SIRSDESimulator.out_dim)),
+#             cond_dim=SIRSDESimulator.in_dim,
+#         )
+#         self.simulator = SimulatorToDistribution(
+#             SIRSDESimulator(time_steps=20),
+#             shape=(SIRSDESimulator.out_dim,),
+#             cond_shape=(SIRSDESimulator.in_dim,),
+#         )
+#         assert covariates.shape == (self.n_obs, self.n_covariates)
+#         self.covariates = covariates
 
-#         self.global_posterior = Normal(jnp.zeros(global_param_dim))
-#         self.local_posterior = eqx.filter_vmap(Normal)(
-#             jnp.zeros(
-#                 (SIRSDECovariateModel.n_obs, SIRSDECovariateModel.local_param_dim),
-#             ),
+#     def __call__(self, *, use_surrogate: bool, obs: Array | None = None):
+#         infection_rate_beta = sample(
+#             "infection_rate_beta",
+#             Normal(jnp.zeros(self.covariates.shape[1]), 0.25),
 #         )
 
-#     def __call__(self, obs: Array | None = None):  # TODO obs ignored.
+#         infection_rate_bias = sample(
+#             "infection_rate_bias",
+#             Normal(-1.5, 0.4),
+#         )
 
-#         global_params = sample("global_params", self.global_posterior)
-#         deterministic("infection_rate_beta_base", global_params[0:3])
-#         deterministic("infection_rate_bias_base", global_params[3])
+#         recovery_rate_beta = sample(
+#             "recovery_rate_beta",
+#             Normal(jnp.zeros(self.covariates.shape[1]), 0.25),
+#         )
 
-#         deterministic("recovery_rate_beta_base", global_params[4:7])
-#         deterministic("recovery_rate_bias_base", global_params[7])
+#         recovery_rate_bias = sample(
+#             "recovery_rate_bias",
+#             Normal(-1.5, 0.4),
+#         )
 
-#         deterministic("r0_mean_reversion_mean_base", global_params[8])
-#         deterministic("r0_volatility_mean_base", global_params[9])
+#         r0_mean_reversion_mean = sample("r0_mean_reversion_mean", Normal(-1.5, 0.4))
+#         r0_volatility_mean = sample("r0_volatility_mean", Normal(-2, 0.4))
 
-#         with numpyro.plate("n_obs", size=SIRSDECovariateModel.n_obs):
-#             local_dist = VmapDistribution(self.local_posterior)
-#             z_base = sample("z_base", local_dist)
+#         infection_rate_means = (
+#             self.covariates @ infection_rate_beta + infection_rate_bias
+#         )
+#         recovery_rate_means = self.covariates @ recovery_rate_beta + recovery_rate_bias
 
-#         deterministic("infection_rate_base", z_base[:, 0])
-#         deterministic("recovery_rate_base", z_base[:, 1])
-#         deterministic("r0_mean_reversion_base", z_base[:, 2])
-#         deterministic("r0_volatility_base", z_base[:, 3])
+#         with numpyro.plate("n_obs", SIRSDECovariateModel.n_obs):
 
-
-# from flowjax.flows import coupling_flow
-
-
-# class SIRSDECovariateGuide(AbstractProgram):
-#     local_posterior: ndist.Normal
-#     global_posterior: ndist.Normal
-
-#     def __init__(self, key: PRNGKeyArray):
-#         global_param_dim = SIRSDECovariateModel.n_covariates * 2 + 4
-#         self.global_posterior = Normal(jnp.zeros(global_param_dim))
-
-#         def get_flow(key):
-#             return coupling_flow(
-#                 key,
-#                 base_dist=Normal(jnp.zeros(SIRSDECovariateModel.local_param_dim)),
-#                 flow_layers=4,
+#             infection_rate = sample(
+#                 "infection_rate",
+#                 ndist.TransformedDistribution(
+#                     ndist.Normal(jnp.zeros(self.n_obs), 1),
+#                     [
+#                         ndist.transforms.AffineTransform(infection_rate_means, 0.2),
+#                         ndist.transforms.ExpTransform(),
+#                     ],
+#                 ),
 #             )
 
-#         self.local_posterior = eqx.filter_vmap(get_flow)(
-#             jr.split(key, SIRSDECovariateModel.n_obs),
-#         )
+#             recovery_rate = sample(
+#                 "recovery_rate",
+#                 ndist.TransformedDistribution(
+#                     ndist.Normal(jnp.zeros(self.n_obs), 1),
+#                     [
+#                         ndist.transforms.AffineTransform(recovery_rate_means, 0.2),
+#                         ndist.transforms.ExpTransform(),
+#                     ],
+#                 ),
+#             )
+
+#             r0_mean_reversion = sample(
+#                 "r0_mean_reversion",
+#                 LogNormal(r0_mean_reversion_mean, 0.2),
+#             )
+
+#             r0_volatility = sample(
+#                 "r0_volatility",
+#                 LogNormal(r0_volatility_mean, 0.2),
+#             )
+#             z = jnp.stack(
+#                 [infection_rate, recovery_rate, r0_mean_reversion, r0_volatility],
+#                 axis=1,
+#             )
+#             z = deterministic("z", jnp.clip(z, min=1e-7, max=1 - 1e-7))
+
+#             if use_surrogate:
+#                 sample("x", self.surrogate, condition=z, obs=obs)
+#             else:
+#                 sample("x", self.simulator, condition=z, obs=obs)
+
+
+# class SIRSDECovariateGuide(AbstractProgram):
+#     infection_rate_beta_dist: AbstractDistribution
+#     infection_rate_bias_dist: AbstractDistribution
+#     recovery_rate_beta_dist: AbstractDistribution
+#     recovery_rate_bias_dist: AbstractDistribution
+#     r0_mean_reversion_mean_dist: AbstractDistribution
+#     r0_volatility_mean_dist: AbstractDistribution
+#     infection_rate_dist: AbstractDistribution
+#     recovery_rate_dist: AbstractDistribution
+#     r0_mean_reversion_dist: AbstractDistribution
+#     r0_volatility_dist: AbstractDistribution
+
+#     def __init__(self, key: PRNGKeyArray):
+#         n_cov = SIRSDECovariateModel.n_covariates
+#         n_obs = SIRSDECovariateModel.n_obs
+#         self.infection_rate_beta_dist = Normal(jnp.zeros(n_cov))
+#         self.infection_rate_bias_dist = Normal()
+#         self.recovery_rate_beta_dist = Normal(jnp.zeros(n_cov))
+#         self.recovery_rate_bias_dist = Normal()
+#         self.r0_mean_reversion_mean_dist = Normal()
+#         self.r0_volatility_mean_dist = Normal()
+#         self.infection_rate_dist = eqx.filter_vmap(Normal)(jnp.zeros(n_obs))
+#         self.recovery_rate_dist = eqx.filter_vmap(Normal)(jnp.zeros(n_obs))
+#         self.r0_mean_reversion_dist = eqx.filter_vmap(Normal)(jnp.zeros(n_obs))
+#         self.r0_volatility_dist = eqx.filter_vmap(Normal)(jnp.zeros(n_obs))
 
 #     def __call__(self, obs: Array | None = None):  # TODO obs ignored.
+#         sample("infection_rate_beta_base", self.infection_rate_beta_dist)
+#         sample("infection_rate_bias_base", self.infection_rate_bias_dist)
 
-#         global_params = sample("global_params", self.global_posterior)
-#         deterministic("infection_rate_beta_base", global_params[0:3])
-#         deterministic("infection_rate_bias_base", global_params[3])
+#         sample("recovery_rate_beta_base", self.recovery_rate_beta_dist)
+#         sample("recovery_rate_bias_base", self.recovery_rate_bias_dist)
 
-#         deterministic("recovery_rate_beta_base", global_params[4:7])
-#         deterministic("recovery_rate_bias_base", global_params[7])
-
-#         deterministic("r0_mean_reversion_mean_base", global_params[8])
-#         deterministic("r0_volatility_mean_base", global_params[9])
+#         sample("r0_mean_reversion_mean_base", self.r0_mean_reversion_mean_dist)
+#         sample("r0_volatility_mean_base", self.r0_volatility_mean_dist)
 
 #         with numpyro.plate("n_obs", size=SIRSDECovariateModel.n_obs):
-#             local_dist = VmapDistribution(self.local_posterior)
-#             z_base = sample("z_base", local_dist)
-
-#         deterministic("infection_rate_base", z_base[:, 0])
-#         deterministic("recovery_rate_base", z_base[:, 1])
-#         deterministic("r0_mean_reversion_base", z_base[:, 2])
-#         deterministic("r0_volatility_base", z_base[:, 3])
+#             sample("infection_rate_base", VmapDistribution(self.infection_rate_dist))
+#             sample("recovery_rate_base", VmapDistribution(self.recovery_rate_dist))
+#             sample(
+#                 "r0_mean_reversion_base",
+#                 VmapDistribution(self.r0_mean_reversion_dist),
+#             )
+#             sample("r0_volatility_base", VmapDistribution(self.r0_volatility_dist))
