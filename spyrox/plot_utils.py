@@ -13,6 +13,7 @@ def pairplot_dictionary(
     shuffle: bool = True,
     equalize_points: bool = True,
     s: float = 10,
+    pairplot_kwargs: dict | None = None,
 ):
     """Generate a poirplot from a dictionary of arrays.
 
@@ -73,7 +74,7 @@ def pairplot_dictionary(
     pairplot = sns.pairplot(
         df,
         hue="source",
-        plot_kws={"sizes": sizes},
+        plot_kws={"sizes": sizes, "edgecolor": "none", "rasterized": True},
         diag_kws={"common_norm": False},
         corner=True,
         hue_order=data.keys(),

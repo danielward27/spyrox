@@ -7,6 +7,7 @@ import jax.random as jr
 import numpyro
 from flowjax.distributions import AbstractDistribution
 from flowjax.experimental.numpyro import _RealNdim
+from jaxtyping import Array
 
 
 def get_abspath_project_root():
@@ -65,3 +66,25 @@ class VmapDistribution(numpyro.distributions.Distribution):
         return _log_prob(self.dist, value)
 
     # TODO no sample and log_prob / with intermediates?
+
+
+class _SetCondition(AbstractDistribution):
+    # TODO document. Make sure condition isn't trained if used.
+    dist: AbstractDistribution
+    condition: Array
+    shape: tuple[int, ...]
+    cond_shape = None
+
+    def __init__(self, dist, condition):
+        self.condition = condition
+        self.shape = dist.shape
+        self.dist = dist
+
+    def _sample(self, key, condition=None):
+        return self.dist._sample(key, condition=self.condition)
+
+    def _sample_and_log_prob(self, key, condition=None):
+        return self.dist._sample_and_log_prob(key, condition=self.condition)
+
+    def _log_prob(self, x, condition=None):
+        return self.dist._log_prob(x, condition=self.condition)

@@ -108,7 +108,9 @@ def run_task(
     }
 
     key, subkey = jr.split(key)
-    results_str = f"{loss_name}_seed={seed}_num_rounds={num_rounds}"
+    results_str = (
+        f"{loss_name}_seed={seed}_num_rounds={num_rounds}_budget={simulation_budget}"
+    )
 
     jnp.savez(f"./results/metrics/{results_str}.npz", **metrics)
     jnp.savez(f"./results/samples/joint_{results_str}.npz", **joint_samples)
@@ -140,24 +142,22 @@ if __name__ == "__main__":
     surrogate_fit_kwargs = {
         "optimizer": optax.apply_if_finite(
             optax.chain(
-                optax.adam(2e-5),
-                optax.clip_by_global_norm(5),
+                optax.adam(2e-4),
+                optax.clip_by_global_norm(10),
             ),
             max_consecutive_errors=10,
         ),
         "max_patience": 5,
         "batch_size": 50,
         "show_progress": args.show_progress,
+        "max_epochs": 300,
     }
-
-    # ELBO results resemble prior (and bad performance) with lr=1e-4 so we use 1e-3
-    guide_lr = 1e-3 if args.loss_name == "ELBO" else 1e-4
 
     guide_fit_kwargs = {
         "optimizer": optax.apply_if_finite(
             optax.chain(
-                optax.adam(guide_lr),
-                optax.clip_by_global_norm(5),
+                optax.adam(1e-4),
+                optax.clip_by_global_norm(10),
             ),
             max_consecutive_errors=10,
         ),

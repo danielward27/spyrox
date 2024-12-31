@@ -4,7 +4,7 @@
 # chmod +x jobs/submitter.sh && ./jobs/submitter.sh
 
 # Define number of rounds and loss names
-num_rounds=(1 4 8)
+num_rounds=(1 2 4)
 loss_names=("ELBO" "SNIS-fKL" "SoftCVI(a=0.75)" "SoftCVI(a=1)")
 
 for loss in "${loss_names[@]}"; do

@@ -25,9 +25,7 @@ class ProgramToProgramSamplesLoss(eqx.Module):
     def __call__(self, params: PyTree, static: PyTree, key: PRNGKeyArray):
         program = paramax.unwrap(eqx.combine(params, static))
         sample = self.program_to_sample.sample(key)
-        loss = -program.log_prob(sample)
-        eqx.debug.breakpoint_if(~jnp.isfinite(loss))  # TODO
-        return loss
+        return -program.log_prob(sample)
 
 
 def get_surrogate(program: AbstractProgram) -> AbstractDistribution:
@@ -75,13 +73,12 @@ def rounds_based_snle(
     guide_fit_kwargs: dict,
     obs: Array,
 ):
-    # We assume the model has a use_surrogate.
+    # We assume the model includes an AbstactProgramWithSurrogate.
     # We assume model has attribute model.simulator
-    # We assume the model has a vector (e.g. deterministic site), containing
-    # simulation parameters.
+    # We assume the model has a site containing a vector of simulation parameters.
     # We assume the last dimensions of simulations are the shape of the simulator
     # not e.g. a plate
-    # The guide is always conditioned on obs, so we do that now
+    # We assume the guide and model accept obs as key word arguments.
 
     guide = SetKwargs(guide, obs=obs)
 
@@ -131,12 +128,6 @@ def rounds_based_snle(
 
         key, subkey = jr.split(key)
         simulations, sim_params = simulate(key, proposal, model)
-
-        if not jnp.isfinite(simulations).all():
-            raise ValueError("Inf or nan values detected in simulations.")
-
-        if not jnp.isfinite(sim_params).all():
-            raise ValueError("Inf or nan values detected in simulator parameters.")
 
         # Fit simulator likelihood
         key, subkey = jr.split(key)
