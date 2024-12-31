@@ -13,7 +13,6 @@ def pairplot_dictionary(
     shuffle: bool = True,
     equalize_points: bool = True,
     s: float = 10,
-    pairplot_kwargs: dict | None = None,
 ):
     """Generate a poirplot from a dictionary of arrays.
 

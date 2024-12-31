@@ -1,6 +1,5 @@
 import equinox as eqx
 import jax
-import jax.numpy as jnp
 import jax.random as jr
 import paramax
 from flowjax.distributions import AbstractDistribution

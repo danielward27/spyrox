@@ -124,7 +124,7 @@ def run_task(
 
 if __name__ == "__main__":
     # Quicker to run example command (not reasonable values though!)
-    # python -m scripts.run_task --seed=-1 --loss-name="SoftCVI" --num-rounds=2 --simulation-budget=100 --guide-steps=10 --surrogate-max-epochs=10 --show-progress
+    # python -m scripts.run_task --seed=-1 --loss-name="SoftCVI(a=1)" --num-rounds=2 --simulation-budget=100 --guide-steps=10 --surrogate-max-epochs=10 --show-progress
 
     # Note guide steps is total.
 
