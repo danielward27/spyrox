@@ -21,6 +21,6 @@ python -m scripts.run_task \
   --seed=$SLURM_ARRAY_TASK_ID \
   --loss-name="$LOSS_NAME" \
   --num-rounds="$NUM_ROUNDS" \
-  --simulation-budget=20000 \
-  --guide-steps=200000 \
+  --simulation-budget=10000 \
+  --guide-steps=100000 \
   --surrogate-max-epochs=300

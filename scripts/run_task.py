@@ -156,7 +156,7 @@ if __name__ == "__main__":
     guide_fit_kwargs = {
         "optimizer": optax.apply_if_finite(
             optax.chain(
-                optax.adam(1e-4),
+                optax.adam(5e-4),
                 optax.clip_by_global_norm(10),
             ),
             max_consecutive_errors=10,

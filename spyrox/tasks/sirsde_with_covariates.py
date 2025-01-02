@@ -60,7 +60,7 @@ class SIRSDESimulator(eqx.Module):
     time_steps: int
     max_solve_steps: int
     in_dim = 4
-    out_dim = 3
+    out_dim = 4
 
     def __init__(self, *, time_steps: int, max_solve_steps: int = 5000):
         self.time_steps = time_steps
@@ -149,12 +149,13 @@ class SIRSDESimulator(eqx.Module):
         x = jnp.clip(x, a_min=1e-5)
         max_ = x.max()
         max_at = (jnp.argmax(x) + jr.uniform(key)) / self.time_steps
+        mean = jnp.mean(x)
         vol = jnp.std(jnp.diff(jnp.log(x)))
 
         # Standardise with location and scale from seperate set of simulations
-        s_loc = jnp.array([0.38, 0.21, 0.14])
-        s_scale = jnp.array([0.14, 0.12, 0.03])
-        s = jnp.array([max_, max_at, vol])
+        s_loc = jnp.array([0.38, 0.21, 0.22, 0.14])
+        s_scale = jnp.array([0.14, 0.12, 0.1, 0.03])
+        s = jnp.array([max_, max_at, mean, vol])
         return (s - s_loc) / s_scale
 
 
@@ -175,7 +176,7 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
             key,
             base_dist=dist.Normal(jnp.zeros(SIRSDESimulator.out_dim)),
             cond_dim=SIRSDESimulator.in_dim,
-            flow_layers=3,
+            flow_layers=4,
             transformer=RationalQuadraticSpline(knots=5, interval=4),
         )
 
@@ -268,7 +269,7 @@ class SIRSDECovariateGuide(AbstractProgram):
             return masked_autoregressive_flow(
                 key,
                 base_dist=Normal(jnp.zeros(SIRSDECovariateModel.n_z)),
-                flow_layers=3,
+                flow_layers=4,
                 transformer=RationalQuadraticSpline(knots=5, interval=4),
                 cond_dim=10,
             )
