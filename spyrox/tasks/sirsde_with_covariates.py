@@ -41,9 +41,9 @@ def get_task(
     key, subkey = jr.split(key)
     guide = SIRSDECovariateGuide(subkey)
     latents = [
-        "infection_rate_beta",
+        "infection_rate_weights",
         "infection_rate_bias",
-        "recovery_rate_beta",
+        "recovery_rate_weights",
         "recovery_rate_bias",
         "r0_mean_reversion_mean",
         "r0_volatility_mean",
@@ -189,8 +189,8 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
         self.covariates = covariates
 
     def __call__(self, *, use_surrogate: bool, obs: Array | None = None):
-        infection_rate_beta = sample(
-            "infection_rate_beta",
+        infection_rate_weights = sample(
+            "infection_rate_weights",
             Normal(jnp.zeros(self.covariates.shape[1]), 0.25),
         )
 
@@ -199,8 +199,8 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
             Normal(-1.5, 0.4),
         )
 
-        recovery_rate_beta = sample(
-            "recovery_rate_beta",
+        recovery_rate_weights = sample(
+            "recovery_rate_weights",
             Normal(jnp.zeros(self.covariates.shape[1]), 0.25),
         )
 
@@ -213,9 +213,11 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
         r0_volatility_mean = sample("r0_volatility_mean", Normal(-2, 0.4))
 
         infection_rate_means = (
-            self.covariates @ infection_rate_beta + infection_rate_bias
+            self.covariates @ infection_rate_weights + infection_rate_bias
         )
-        recovery_rate_means = self.covariates @ recovery_rate_beta + recovery_rate_bias
+        recovery_rate_means = (
+            self.covariates @ recovery_rate_weights + recovery_rate_bias
+        )
 
         z_means = jnp.stack(
             [
@@ -247,9 +249,9 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
 
 
 class SIRSDECovariateGuide(AbstractProgram):
-    infection_rate_beta_dist: Normal
+    infection_rate_weights_dist: Normal
     infection_rate_bias_dist: Normal
-    recovery_rate_beta_dist: Normal
+    recovery_rate_weights_dist: Normal
     recovery_rate_bias_dist: Normal
     r0_mean_reversion_mean_dist: Normal
     r0_volatility_mean_dist: Normal
@@ -258,9 +260,9 @@ class SIRSDECovariateGuide(AbstractProgram):
     def __init__(self, key: PRNGKeyArray):
         n_cov = SIRSDECovariateModel.n_covariates
         n_obs = SIRSDECovariateModel.n_obs
-        self.infection_rate_beta_dist = Normal(jnp.zeros(n_cov))
+        self.infection_rate_weights_dist = Normal(jnp.zeros(n_cov))
         self.infection_rate_bias_dist = Normal()
-        self.recovery_rate_beta_dist = Normal(jnp.zeros(n_cov))
+        self.recovery_rate_weights_dist = Normal(jnp.zeros(n_cov))
         self.recovery_rate_bias_dist = Normal()
         self.r0_mean_reversion_mean_dist = Normal()
         self.r0_volatility_mean_dist = Normal()
@@ -278,9 +280,9 @@ class SIRSDECovariateGuide(AbstractProgram):
 
     def __call__(self, obs: Array | None = None):  # TODO obs ignored.
         global_params = [
-            sample("infection_rate_beta_base", self.infection_rate_beta_dist),
+            sample("infection_rate_weights_base", self.infection_rate_weights_dist),
             sample("infection_rate_bias_base", self.infection_rate_bias_dist),
-            sample("recovery_rate_beta_base", self.recovery_rate_beta_dist),
+            sample("recovery_rate_weights_base", self.recovery_rate_weights_dist),
             sample("recovery_rate_bias_base", self.recovery_rate_bias_dist),
             sample("r0_mean_reversion_mean_base", self.r0_mean_reversion_mean_dist),
             sample("r0_volatility_mean_base", self.r0_volatility_mean_dist),

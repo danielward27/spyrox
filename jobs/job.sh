@@ -4,8 +4,9 @@
 #SBATCH --mem=4GB
 #SBATCH --account=math026082
 #SBATCH --output=%x_%A_%a.out
-#SBATCH --time=6:00:00
-#SBATCH --array=0-50
+#SBATCH --time=4:00:00
+#SBATCH --array1-100
+
 
 LOSS_NAME=$1
 NUM_ROUNDS=$2

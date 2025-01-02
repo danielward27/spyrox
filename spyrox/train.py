@@ -1,5 +1,6 @@
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 import jax.random as jr
 import paramax
 from flowjax.distributions import AbstractDistribution
@@ -61,6 +62,11 @@ def set_surrogate(
     )
 
 
+# In order to be safe, we retrain from scratch each round.
+# Otherwise, we may simulatenously overfit old samples whilst underfitting
+# new samples.
+
+
 def rounds_based_snle(
     key: PRNGKeyArray,
     model: AbstractProgram,
@@ -90,6 +96,9 @@ def rounds_based_snle(
     obs_name = model.site_names(use_surrogate=False, obs=obs).observed
     assert len(obs_name) == 1
     obs_name = list(obs_name)[0]
+    untrained_surrogate = get_surrogate(model)
+    all_simulations = []
+    all_sim_params = []
 
     @eqx.filter_jit
     def simulate(
@@ -127,14 +136,16 @@ def rounds_based_snle(
 
         key, subkey = jr.split(key)
         simulations, sim_params = simulate(key, proposal, model)
+        all_simulations.append(simulations)
+        all_sim_params.append(sim_params)
 
-        # Fit simulator likelihood
+        # Fit surrogate
         key, subkey = jr.split(key)
         surrogate, loss_vals = fit_to_data(
             subkey,
-            dist=get_surrogate(model),
-            x=simulations,
-            condition=sim_params,
+            dist=untrained_surrogate,
+            x=jnp.concatenate(all_simulations, axis=0),
+            condition=jnp.concatenate(all_sim_params, axis=0),
             **surrogate_fit_kwargs,
         )
         losses["surrogate"]["train"].append(loss_vals["train"])
