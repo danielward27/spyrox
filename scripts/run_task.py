@@ -28,7 +28,10 @@ def get_losses(n_particles=8):
             n_particles=n_particles,
             alpha=1,
         ),
-        "ELBO": losses.EvidenceLowerBoundLoss(n_particles=n_particles),
+        "ELBO": losses.EvidenceLowerBoundLoss(
+            n_particles=n_particles,
+            stick_the_landing=True,
+        ),
         "SNIS-fKL": losses.SelfNormImportanceWeightedForwardKLLoss(
             n_particles=n_particles,
         ),
@@ -113,13 +116,13 @@ def run_task(
     )
 
     jnp.savez(f"./results/metrics/{results_str}.npz", **metrics)
-    jnp.savez(f"./results/samples/joint_{results_str}.npz", **joint_samples)
-    jnp.savez(f"./results/samples/guide_{results_str}.npz", **guide_samps)
-    jnp.savez(f"./results/samples/true_{results_str}.npz", **true_latents)
-    jnp.savez(f"./results/losses/{results_str}.npz", **losses)
 
-    # Save guide
-    eqx.tree_serialise_leaves(f"./results/models/{results_str}.eqx", guide)
+    if seed <= 10:  # No need to save for all runs
+        jnp.savez(f"./results/samples/joint_{results_str}.npz", **joint_samples)
+        jnp.savez(f"./results/samples/guide_{results_str}.npz", **guide_samps)
+        jnp.savez(f"./results/samples/true_{results_str}.npz", **true_latents)
+        jnp.savez(f"./results/losses/{results_str}.npz", **losses)
+        eqx.tree_serialise_leaves(f"./results/models/{results_str}.eqx", guide)
 
 
 if __name__ == "__main__":
