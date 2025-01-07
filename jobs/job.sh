@@ -5,7 +5,7 @@
 #SBATCH --account=math026082
 #SBATCH --output=%x_%A_%a.out
 #SBATCH --time=4:00:00
-#SBATCH --array1-100
+#SBATCH --array=1-100
 
 
 LOSS_NAME=$1
