@@ -25,9 +25,7 @@ class ProgramToProgramSamplesLoss(eqx.Module):
     def __call__(self, params: PyTree, static: PyTree, key: PRNGKeyArray):
         program = paramax.unwrap(eqx.combine(params, static))
         sample = self.program_to_sample.sample(key)
-        loss = -program.log_prob(sample)
-        eqx.debug.breakpoint_if(~jnp.isfinite(loss))  # TODO
-        return loss
+        return -program.log_prob(sample)
 
 
 def get_surrogate(program: AbstractProgram) -> AbstractDistribution:
@@ -64,24 +62,29 @@ def set_surrogate(
     )
 
 
+# In order to be safe, we retrain from scratch each round.
+# Otherwise, we may simulatenously overfit old samples whilst underfitting
+# new samples.
+
+
 def rounds_based_snle(
     key: PRNGKeyArray,
     model: AbstractProgram,
     guide: AbstractProgram,
     num_rounds: int,
-    sim_per_round: int,
+    samples_per_round: int,
     sim_param_name: str,
     surrogate_fit_kwargs: dict,
     guide_fit_kwargs: dict,
     obs: Array,
 ):
-    # We assume the model has a use_surrogate.
+    # We assume the model includes an AbstactProgramWithSurrogate.
     # We assume model has attribute model.simulator
-    # We assume the model has a vector (e.g. deterministic site)?
+    # We assume the model has a site containing a vector of simulation parameters.
     # We assume the last dimensions of simulations are the shape of the simulator
     # not e.g. a plate
+    # We assume the guide and model accept obs as key word arguments.
 
-    # The guide is always conditioned on obs, so we do that now
     guide = SetKwargs(guide, obs=obs)
 
     losses = {
@@ -93,6 +96,9 @@ def rounds_based_snle(
     obs_name = model.site_names(use_surrogate=False, obs=obs).observed
     assert len(obs_name) == 1
     obs_name = list(obs_name)[0]
+    untrained_surrogate = get_surrogate(model)
+    all_simulations = []
+    all_sim_params = []
 
     @eqx.filter_jit
     def simulate(
@@ -113,7 +119,7 @@ def rounds_based_snle(
 
         key, subkey = jr.split(key)
         sim_params, simulations = jax.vmap(simulate_single)(
-            jr.split(subkey, sim_per_round),
+            jr.split(subkey, samples_per_round),
         )
         # Reshape to remove any plates
         simulations = simulations.reshape(-1, *get_surrogate(model).shape)
@@ -130,17 +136,16 @@ def rounds_based_snle(
 
         key, subkey = jr.split(key)
         simulations, sim_params = simulate(key, proposal, model)
+        all_simulations.append(simulations)
+        all_sim_params.append(sim_params)
 
-        if not jnp.isfinite(simulations).all():
-            raise ValueError("Inf or nan values detected in simulations.")
-
-        # Fit simulator likelihood
+        # Fit surrogate
         key, subkey = jr.split(key)
         surrogate, loss_vals = fit_to_data(
             subkey,
-            dist=get_surrogate(model),
-            x=simulations,
-            condition=sim_params,
+            dist=untrained_surrogate,
+            x=jnp.concatenate(all_simulations, axis=0),
+            condition=jnp.concatenate(all_sim_params, axis=0),
             **surrogate_fit_kwargs,
         )
         losses["surrogate"]["train"].append(loss_vals["train"])
@@ -165,144 +170,3 @@ def rounds_based_snle(
     # Unwrap the guide from SetKwargs wrapper
     guide = guide.program
     return (model, guide), losses
-
-
-# TODO simulator should probably be seperate to model?
-# def continuous_training(
-#     *,
-#     key: PRNGKeyArray,
-#     model: AbstractProgram,
-#     guide: AbstractProgram,
-#     steps: int,
-#     obs: Array,
-#     surrogate_optimizer: optax.GradientTransformation,
-#     vi_optimizer: optax.GradientTransformation,
-#     simulator_param_name: str,
-#     obs_name: str = "obs",
-#     show_progress: bool = True,
-# ):
-#     losses = {
-#         "surrogate": [],
-#         "vi": [],
-#     }
-
-#     params, static = eqx.partition(
-#         (model, guide),
-#         eqx.is_inexact_array,
-#         is_leaf=lambda leaf: isinstance(leaf, wrappers.NonTrainable),
-#     )
-
-#     surrogate_loss_fn = partial(
-#         fjlosses.MaximumLikelihoodLoss(),
-#         static=static[0].simulator.surrogate,
-#     )
-
-#     vi_loss_fn = partial(
-#         SoftContrastiveEstimationLoss(n_particles=2, alpha=0.75),
-#         obs=obs,
-#         static=static,
-#     )
-
-#     opt_states = {
-#         "surrogate": surrogate_optimizer.init(params[0].simulator.surrogate),
-#         "vi": vi_optimizer.init(params),
-#     }
-
-#     simulator_in_size = model.simulator.cond_shape[0]
-#     simulator_out_size = model.simulator.shape[0]
-
-#     @eqx.filter_jit
-#     def sample_proposal_joint(key, params):
-#         model, guide = eqx.combine(params, static)
-
-#         key, subkey = jr.split(key)
-#         latents = guide.sample(subkey, obs=obs)
-
-#         key, subkey = jr.split(key)
-#         simulations = model.sample(subkey, condition=latents)[obs_name]
-#         sim_params = latents[simulator_param_name]
-
-#         # Simulations and parameters may have shape (n_sim, plate, out_dim) so reshape
-#         simulations = simulations.reshape(-1, simulator_out_size)
-#         sim_params = sim_params.reshape(-1, simulator_in_size)
-#         return simulations, sim_params
-
-#     @eqx.filter_jit
-#     def combined_steps(
-#         params,
-#         *,
-#         key,
-#         opt_states,  # dict wth (surrogate, vi)
-#         sim_params,
-#         simulation,
-#     ):
-
-#         surrogate_params = params[0].simulator.surrogate
-#         losses = {}
-
-#         # Surrogate step
-#         surrogate_params, opt_states["surrogate"], losses["surrogate"] = step(
-#             surrogate_params,
-#             x=simulation,
-#             condition=sim_params,
-#             optimizer=surrogate_optimizer,
-#             opt_state=opt_states["surrogate"],
-#             loss_fn=surrogate_loss_fn,
-#         )
-
-#         # Update model with new surrogate
-#         params = eqx.tree_at(
-#             where=lambda p: p[0].simulator.surrogate,
-#             pytree=params,
-#             replace=surrogate_params,
-#         )
-
-#         # TODO ensure surrogate is not trainable in VI objective
-#         # (model may have trainable parameters in general though)
-
-#         # VI step
-#         params, opt_states["vi"], losses["vi"] = step(
-#             params,
-#             key=key,
-#             optimizer=vi_optimizer,
-#             opt_state=opt_states["vi"],
-#             loss_fn=vi_loss_fn,
-#         )
-
-#         return params, opt_states, losses
-
-#     for _ in trange(steps, disable=not show_progress):
-
-#         total_start = time()
-
-#         start_time = time()
-#         simulations, sim_params = jax.block_until_ready(
-#             sample_proposal_joint(key, params),
-#         )
-#         print("simulations:", time() - start_time)
-
-#         if not jnp.isfinite(simulations).all():
-#             print("Warning: simulation had infs, skipping optimization step.")
-#             continue
-
-#         start_time = time()
-
-#         params, opt_states, losses_i = jax.block_until_ready(
-#             combined_steps(
-#                 params,
-#                 key=key,
-#                 opt_states=opt_states,
-#                 sim_params=sim_params,
-#                 simulation=simulations,
-#             )
-#         )
-#         print("combined_steps:", time() - start_time)
-
-#         start_time = time()
-#         losses["surrogate"].append(losses_i["surrogate"])
-#         losses["vi"].append(losses_i["vi"])
-#         print("appending_to_losses:", time() - start_time)
-
-#         print("total", time() - total_start)
-
-#     return eqx.combine(params, static), losses

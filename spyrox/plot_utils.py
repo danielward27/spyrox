@@ -73,7 +73,7 @@ def pairplot_dictionary(
     pairplot = sns.pairplot(
         df,
         hue="source",
-        plot_kws={"sizes": sizes},
+        plot_kws={"sizes": sizes, "edgecolor": "none", "rasterized": True},
         diag_kws={"common_norm": False},
         corner=True,
         hue_order=data.keys(),
