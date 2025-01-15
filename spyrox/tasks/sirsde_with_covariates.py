@@ -278,6 +278,11 @@ class SIRSDECovariateGuide(AbstractProgram):
 
         self.z_dist = eqx.filter_vmap(get_flow)(jr.split(key, n_obs))
 
+        # For amortized, we need following three lines:
+        # 1) self.z_dist = masked_autoregressive_flow(*args, **kwargs, cond_dim=14)
+        # 2) condition = jnp.concatenate([global_stacked, obs], axis=1)
+        # 3) sample("z_base", self.z_dist, condition=condition)
+
     def __call__(self, obs: Array | None = None):  # TODO obs ignored.
         global_params = [
             sample("infection_rate_weights_base", self.infection_rate_weights_dist),
@@ -294,7 +299,6 @@ class SIRSDECovariateGuide(AbstractProgram):
             SIRSDECovariateModel.n_obs,
             -1,
         )
-        # Repeat for each obs
 
         with numpyro.plate("n_obs", size=SIRSDECovariateModel.n_obs):
             sample(

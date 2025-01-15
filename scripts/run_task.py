@@ -96,7 +96,7 @@ def run_task(
     data_space_guide = GuideToDataSpace(
         guide=guide,
         model=model,
-        guide_kwargs={},
+        guide_kwargs={"obs": obs},
         model_kwargs={"use_surrogate": False, "obs": obs},
     )
 
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     guide_fit_kwargs = {
         "optimizer": optax.apply_if_finite(
             optax.chain(
-                optax.adam(3e-4),
+                optax.adam(2e-4),
                 optax.clip_by_global_norm(10),
             ),
             max_consecutive_errors=10,

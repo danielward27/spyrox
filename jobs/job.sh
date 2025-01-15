@@ -4,7 +4,7 @@
 #SBATCH --mem=4GB
 #SBATCH --account=math026082
 #SBATCH --output=%x_%A_%a.out
-#SBATCH --time=4:00:00
+#SBATCH --time=5:00:00
 #SBATCH --array=1-100
 
 
@@ -22,6 +22,6 @@ python -m scripts.run_task \
   --seed=$SLURM_ARRAY_TASK_ID \
   --loss-name="$LOSS_NAME" \
   --num-rounds="$NUM_ROUNDS" \
-  --simulation-budget=10000 \
-  --guide-steps=100000 \
+  --simulation-budget=20000 \
+  --guide-steps=200000 \
   --surrogate-max-epochs=300
