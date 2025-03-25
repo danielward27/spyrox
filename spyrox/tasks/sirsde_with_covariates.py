@@ -18,7 +18,7 @@ from diffrax import (
 from flowjax.bijections import RationalQuadraticSpline
 from flowjax.distributions import AbstractDistribution, Normal, Transformed
 from flowjax.experimental.numpyro import sample
-from flowjax.flows import masked_autoregressive_flow
+from flowjax.flows import coupling_flow, masked_autoregressive_flow
 from jax import Array
 from jaxtyping import PRNGKeyArray, ScalarLike
 from numpyro.infer.reparam import TransformReparam
@@ -41,12 +41,7 @@ def get_task(
     key, subkey = jr.split(key)
     guide = SIRSDECovariateGuide(subkey)
     latents = [
-        "infection_rate_weights",
-        "infection_rate_bias",
-        "recovery_rate_weights",
-        "recovery_rate_bias",
-        "r0_mean_reversion_mean",
-        "r0_volatility_mean",
+        "tau",
         "z",
     ]
     reparam = {n: TransformReparam() for n in latents}
@@ -176,8 +171,8 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
             key,
             base_dist=dist.Normal(jnp.zeros(SIRSDESimulator.out_dim)),
             cond_dim=SIRSDESimulator.in_dim,
-            flow_layers=4,
-            transformer=RationalQuadraticSpline(knots=5, interval=4),
+            flow_layers=6,
+            transformer=RationalQuadraticSpline(knots=8, interval=4),
         )
 
         self.simulator = SimulatorToDistribution(
@@ -189,28 +184,19 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
         self.covariates = covariates
 
     def __call__(self, *, use_surrogate: bool, obs: Array | None = None):
-        infection_rate_weights = sample(
-            "infection_rate_weights",
-            Normal(jnp.zeros(self.covariates.shape[1]), 0.25),
-        )
 
-        infection_rate_bias = sample(
-            "infection_rate_bias",
-            Normal(-1.5, 0.4),
+        tau_dist = Normal(
+            jnp.array([0, 0, 0, -1.5, 0, 0, 0, -1.5, -1.5, -2]),
+            jnp.array([0.25, 0.25, 0.25, 0.4, 0.25, 0.25, 0.25, 0.4, 0.4, 0.4]),
         )
+        tau = sample("tau", tau_dist)
 
-        recovery_rate_weights = sample(
-            "recovery_rate_weights",
-            Normal(jnp.zeros(self.covariates.shape[1]), 0.25),
-        )
-
-        recovery_rate_bias = sample(
-            "recovery_rate_bias",
-            Normal(-1.5, 0.4),
-        )
-
-        r0_mean_reversion_mean = sample("r0_mean_reversion_mean", Normal(-1.5, 0.4))
-        r0_volatility_mean = sample("r0_volatility_mean", Normal(-2, 0.4))
+        infection_rate_weights = tau[:3]
+        infection_rate_bias = tau[3]
+        recovery_rate_weights = tau[4:7]
+        recovery_rate_bias = tau[7]
+        r0_mean_reversion_mean = tau[8]
+        r0_volatility_mean = tau[9]
 
         infection_rate_means = (
             self.covariates @ infection_rate_weights + infection_rate_bias
@@ -248,35 +234,55 @@ class SIRSDECovariateModel(AbstactProgramWithSurrogate):
                 sample("x", self.simulator, condition=z, obs=obs)
 
 
+import equinox as eqx
+import jax
+
+
+def scale_nn_initialisation(model, scale=0.01):
+    # Encourage Gaussian global at init
+
+    def map_fn(leaf):
+        if isinstance(leaf, eqx.nn.Linear):
+            return jax.tree.map(lambda x: scale * x, leaf)
+        return leaf
+
+    return jax.tree.map(
+        map_fn,
+        model,
+        is_leaf=lambda leaf: isinstance(leaf, eqx.nn.Linear),
+    )
+
+
+from flowjax.distributions import MultivariateNormal
+from paramax import WeightNormalization
+
+
 class SIRSDECovariateGuide(AbstractProgram):
-    infection_rate_weights_dist: Normal
-    infection_rate_bias_dist: Normal
-    recovery_rate_weights_dist: Normal
-    recovery_rate_bias_dist: Normal
-    r0_mean_reversion_mean_dist: Normal
-    r0_volatility_mean_dist: Normal
+    tau_dist: Normal
     z_dist: AbstractDistribution
 
     def __init__(self, key: PRNGKeyArray):
-        n_cov = SIRSDECovariateModel.n_covariates
         n_obs = SIRSDECovariateModel.n_obs
-        self.infection_rate_weights_dist = Normal(jnp.zeros(n_cov))
-        self.infection_rate_bias_dist = Normal()
-        self.recovery_rate_weights_dist = Normal(jnp.zeros(n_cov))
-        self.recovery_rate_bias_dist = Normal()
-        self.r0_mean_reversion_mean_dist = Normal()
-        self.r0_volatility_mean_dist = Normal()
+        tau_key, z_key = jr.split(key)
+
+        # MVN + weight norm for better optimization
+        tau_dist = MultivariateNormal(jnp.zeros(10), jnp.eye(10))
+        self.tau_dist = eqx.tree_at(
+            lambda dist: dist.bijection.triangular,
+            tau_dist,
+            replace_fn=WeightNormalization,
+        )
 
         def get_flow(key):
-            return masked_autoregressive_flow(
+            return coupling_flow(
                 key,
                 base_dist=Normal(jnp.zeros(SIRSDECovariateModel.n_z)),
-                flow_layers=4,
-                transformer=RationalQuadraticSpline(knots=5, interval=4),
                 cond_dim=10,
+                flow_layers=4,
+                transformer=RationalQuadraticSpline(knots=6, interval=4),
             )
 
-        self.z_dist = eqx.filter_vmap(get_flow)(jr.split(key, n_obs))
+        self.z_dist = eqx.filter_vmap(get_flow)(jr.split(z_key, n_obs))
 
         # For amortized, we need following three lines:
         # 1) self.z_dist = masked_autoregressive_flow(*args, **kwargs, cond_dim=14)
@@ -284,17 +290,9 @@ class SIRSDECovariateGuide(AbstractProgram):
         # 3) sample("z_base", self.z_dist, condition=condition)
 
     def __call__(self, obs: Array | None = None):  # TODO obs ignored.
-        global_params = [
-            sample("infection_rate_weights_base", self.infection_rate_weights_dist),
-            sample("infection_rate_bias_base", self.infection_rate_bias_dist),
-            sample("recovery_rate_weights_base", self.recovery_rate_weights_dist),
-            sample("recovery_rate_bias_base", self.recovery_rate_bias_dist),
-            sample("r0_mean_reversion_mean_base", self.r0_mean_reversion_mean_dist),
-            sample("r0_volatility_mean_base", self.r0_volatility_mean_dist),
-        ]
-        global_stacked = jnp.concatenate(
-            [jnp.atleast_1d(p) for p in global_params],
-        )
+
+        global_stacked = sample("tau_base", self.tau_dist)
+
         global_stacked = jnp.tile(global_stacked, SIRSDECovariateModel.n_obs).reshape(
             SIRSDECovariateModel.n_obs,
             -1,

@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import optax
+from jax.flatten_util import ravel_pytree
 from pyrox import losses
 from pyrox.program import (
     GuideToDataSpace,
@@ -88,7 +89,6 @@ def run_task(
     n_samples = 1000
 
     key, subkey = jr.split(key)
-
     joint_samples = jax.jit(jax.vmap(partial(model.sample, use_surrogate=False)))(
         jr.split(key, n_samples),
     )
@@ -100,16 +100,58 @@ def run_task(
         model_kwargs={"use_surrogate": False, "obs": obs},
     )
 
-    log_prob_true = data_space_guide.log_prob(true_latents)
+    data_space_true_latents = {
+        k: v for k, v in true_latents.items() if not k.endswith("_base")
+    }
+
+    true_latents_base = {
+        k: v for k, v in true_latents.items() if k in guide.site_names().latent
+    }
+
+    # log prob theta^*
+    log_prob_true = data_space_guide.log_prob(data_space_true_latents, reduce=False)
+
+    # Prior mass on global^*
+    prior = model.program.get_prior("x")
+
+    prior_log_prob_true_global = {
+        k: v
+        for k, v in prior.log_prob(
+            data_space_true_latents,
+            reduce=False,
+            use_surrogate=True,  # Unused but needs to be provided
+        ).items()
+        if k != "z"
+    }
+    prior_log_prob_true_global = sum(
+        v.sum() for v in prior_log_prob_true_global.values()
+    )
 
     guide_samps = jax.jit(jax.vmap(data_space_guide.sample))(jr.split(key, n_samples))
     guide_lps = eqx.filter_vmap(data_space_guide.log_prob)(guide_samps)
 
-    metrics = {
-        "log_prob_true": log_prob_true,
-        "coverage_prob": jnp.mean(log_prob_true >= guide_lps),
-    }
+    # Distance from truth in reparameterised space
+    guide_samps_base = jax.vmap(partial(guide.sample, obs=obs))(
+        jr.split(key, n_samples),
+    )
+    guide_base_mean = {k: v.mean(axis=0) for k, v in guide_samps_base.items()}
+    diffs = jax.tree.map(  # From mean as prediction to truth
+        lambda a, b: a - b,
+        guide_base_mean,
+        true_latents_base,
+    )
 
+    negative_l2_norm = -jnp.linalg.norm(ravel_pytree(diffs)[0])
+
+    metrics = {
+        "log_prob_true_tau": log_prob_true["tau"],
+        "log_prob_true_z": log_prob_true["z"].sum(),
+        "prior_log_prob_true_global": prior_log_prob_true_global,
+        "coverage_prob": jnp.mean(
+            (log_prob_true["z"].sum() + log_prob_true["tau"]) >= guide_lps,
+        ),
+        "negative_l2_norm": negative_l2_norm,
+    }
     key, subkey = jr.split(key)
     results_str = (
         f"{loss_name}_seed={seed}_num_rounds={num_rounds}_budget={simulation_budget}"
@@ -127,7 +169,7 @@ def run_task(
 
 if __name__ == "__main__":
     # Quicker to run example command (not reasonable values though!)
-    # python -m scripts.run_task --seed=-1 --loss-name="SoftCVI(a=1)" --num-rounds=2 --simulation-budget=100 --guide-steps=10 --surrogate-max-epochs=10 --show-progress
+    # python -m scripts.run_task --seed=-1 --loss-name="SoftCVI(a=1)" --num-rounds=1 --simulation-budget=100 --guide-steps=10 --surrogate-max-epochs=10 --show-progress
 
     # Note guide steps is total.
 
@@ -156,10 +198,33 @@ if __name__ == "__main__":
         "max_epochs": 300,
     }
 
+    # Set up guide optimizer:
+
+    # def get_mask(both_params, *, tau: bool):
+    #     mask = jax.tree.map(lambda _: not tau, both_params)
+
+    #     return eqx.tree_at(
+    #         lambda mask: mask[1].program.tau_dist,
+    #         mask,
+    #         replace_fn=lambda p: jax.tree.map(lambda _: tau, p),
+    #     )
+
+    # optax.chain(
+    #             optax.masked(
+    #                 optax.adam(learning_rate=2e-6),
+    #                 partial(get_mask, tau=True),
+    #             ),
+    #             optax.masked(
+    #                 optax.adam(learning_rate=2e-5),
+    #                 partial(get_mask, tau=False),
+    #             ),
+    #             optax.clip_by_global_norm(10),
+    #         ),
+
     guide_fit_kwargs = {
         "optimizer": optax.apply_if_finite(
             optax.chain(
-                optax.adam(2e-4),
+                optax.adam(learning_rate=2e-4),
                 optax.clip_by_global_norm(10),
             ),
             max_consecutive_errors=10,
